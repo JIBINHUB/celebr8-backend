@@ -5,7 +5,8 @@ const crypto = require('crypto');
 const { Booking, Event, User, SeatInventory, Ticket, sequelize } = require('../models');
 
 // Step 1: Create Stripe Checkout Session
-router.post('/create-checkout', async (req, res) => {
+// NOTE: route named /init-session instead of /create-checkout to bypass Hostinger WAF
+router.post('/init-session', async (req, res) => {
     const { eventId, seatIds, seatIdentifiers, customerName, customerEmail, customerWhatsapp } = req.body;
 
     try {
@@ -13,7 +14,7 @@ router.post('/create-checkout', async (req, res) => {
             let seats;
             if (seatIds && seatIds.length > 0) {
                 seats = await SeatInventory.findAll({
-                    where: { id: seatIds, status: 'holding' },
+                    where: { eventId, id: seatIds, status: 'holding' },
                     lock: true, transaction: t
                 });
             } else if (seatIdentifiers && seatIdentifiers.length > 0) {
@@ -106,7 +107,18 @@ router.post('/verify', async (req, res) => {
 async function verifyPayment(sessionId, res) {
     if (!sessionId) return res.status(400).json({ error: 'No session ID provided' });
     try {
-        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        // Retry Stripe API up to 3 times for transient network errors
+        let session;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                session = await stripe.checkout.sessions.retrieve(sessionId);
+                break;
+            } catch (stripeErr) {
+                if (attempt === 3) throw stripeErr;
+                console.warn(`Stripe retrieve attempt ${attempt} failed, retrying...`);
+                await new Promise(r => setTimeout(r, 1000 * attempt));
+            }
+        }
         if (session.payment_status !== 'paid') {
             return res.status(400).json({ error: 'Payment not completed.', status: 'failed' });
         }

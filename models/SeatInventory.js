@@ -14,7 +14,10 @@ const SeatInventory = sequelize.define('SeatInventory', {
     indexes: [
         { fields: ['identifier'] },
         { fields: ['eventId'] },
-        { fields: ['status'] }
+        { fields: ['status'] },
+        { fields: ['eventId', 'status'] },       // Cleanup query: WHERE eventId=? AND status='holding'
+        { fields: ['eventId', 'identifier'] },    // Seat lookup: WHERE eventId=? AND identifier IN (...)
+        { fields: ['status', 'lockedAt'] }        // Expiry sweep: WHERE status='holding' AND lockedAt < ?
     ]
 });
 

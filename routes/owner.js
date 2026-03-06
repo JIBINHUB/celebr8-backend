@@ -67,8 +67,10 @@ router.get('/stats', authMiddleware, async (req, res) => {
         res.json({
             totalBookings,
             totalRevenue,
+            revenue: totalRevenue,       // Alias for frontend admin panel
             totalTickets,
             usedTickets,
+            checkedIn: usedTickets,       // Alias for frontend admin panel
             eventStats
         });
     } catch (err) {
@@ -76,31 +78,80 @@ router.get('/stats', authMiddleware, async (req, res) => {
     }
 });
 
-// GET /bookings — All Confirmed Bookings
+// GET /bookings — All Confirmed Bookings (normalized for frontend)
 router.get('/bookings', authMiddleware, async (req, res) => {
     try {
         const bookings = await Booking.findAll({
             where: { status: 'confirmed' },
             include: [
                 { model: User },
-                { model: Event, attributes: ['id', 'title'] },
-                { model: SeatInventory, attributes: ['identifier', 'zone', 'price'] },
+                { model: Event, attributes: ['id', 'title', 'city', 'venue', 'subtitle'] },
+                { model: SeatInventory, attributes: ['id', 'identifier', 'zone', 'price'] },
                 { model: Ticket, attributes: ['id', 'qrCodeString', 'status'] }
             ],
             order: [['createdAt', 'DESC']],
             limit: parseInt(req.query.limit) || 500
         });
-        res.json(bookings);
+
+        // Normalize into the flat shape the frontend expects
+        const normalized = bookings.map(b => ({
+            id: b.id,
+            eventId: b.eventId,
+            customerName: b.User?.name || '—',
+            customerEmail: b.User?.email || '—',
+            customerWhatsapp: b.User?.whatsapp || '—',
+            totalAmount: b.totalAmount,
+            status: b.status,
+            eventTitle: b.Event?.title || '',
+            eventCity: b.Event?.city || '',
+            createdAt: b.createdAt,
+            tickets: (b.Tickets || []).map(t => {
+                // Find matching seat for this ticket
+                const seat = (b.SeatInventories || []).find(s => s.id === t.dataValues?.seatId)
+                    || (b.SeatInventories || [])[0]; // fallback
+                return {
+                    ticketId: t.id,
+                    qrCodeString: t.qrCodeString,
+                    seatIdentifier: seat?.identifier || '—',
+                    zone: seat?.zone || '—',
+                    price: seat?.price || 0,
+                    checkedIn: t.status === 'used'
+                };
+            }),
+            // Fallback: if no tickets but has seats, show the seats
+            seats: (b.SeatInventories || []).map(s => ({
+                identifier: s.identifier,
+                zone: s.zone,
+                price: s.price
+            }))
+        }));
+
+        res.json(normalized);
     } catch (err) {
+        console.error('OWNER BOOKINGS ERROR:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-// GET /events — All Events
+// GET /events — All Events (with seat counts for dashboard)
 router.get('/events', authMiddleware, async (req, res) => {
     try {
         const events = await Event.findAll();
-        res.json(events);
+        const enriched = [];
+        for (const event of events) {
+            const totalSeats = await SeatInventory.count({ where: { eventId: event.id } });
+            const bookedSeats = await SeatInventory.count({ where: { eventId: event.id, status: 'booked' } });
+            const holdingSeats = await SeatInventory.count({ where: { eventId: event.id, status: 'holding' } });
+            enriched.push({
+                ...event.toJSON(),
+                totalSeats,
+                bookedSeats,
+                holdingSeats,
+                availableSeats: totalSeats - bookedSeats - holdingSeats,
+                fillRate: totalSeats > 0 ? ((bookedSeats / totalSeats) * 100).toFixed(1) : 0
+            });
+        }
+        res.json(enriched);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
